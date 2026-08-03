@@ -18,11 +18,19 @@ export function getApiKey(provider: Provider): string | undefined {
   return process.env[KEY_ENV[provider]];
 }
 
-async function withTimeout<T>(p: Promise<T>, ms = 60000): Promise<T> {
-  const controller = new Promise<T>((_, reject) =>
-    setTimeout(() => reject(new Error(`Timeout sau ${ms}ms`)), ms)
-  );
-  return Promise.race([p, controller]);
+async function withTimeout<T>(fn: (signal: AbortSignal) => Promise<T>, ms = 60000): Promise<T> {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), ms);
+  try {
+    return await fn(controller.signal);
+  } catch (error: any) {
+    if (error.name === 'AbortError') {
+      throw new Error(`Timeout sau ${ms}ms`);
+    }
+    throw error;
+  } finally {
+    clearTimeout(timeoutId);
+  }
 }
 
 // ---- Chuẩn OpenAI-compatible (dùng cho openai, xai, deepseek, moonshot, openrouter) ----
@@ -31,7 +39,8 @@ async function openAiCompatible(
   apiKey: string,
   model: string,
   prompt: string,
-  extraHeaders: Record<string, string> = {}
+  extraHeaders: Record<string, string> = {},
+  signal?: AbortSignal
 ): Promise<string> {
   const res = await fetch(`${baseUrl}/chat/completions`, {
     method: "POST",
@@ -48,6 +57,7 @@ async function openAiCompatible(
       ],
       temperature: 0.7,
     }),
+    signal,
   });
 
   if (!res.ok) {
@@ -64,7 +74,8 @@ async function openAiCompatible(
 async function anthropic(
   apiKey: string,
   model: string,
-  prompt: string
+  prompt: string,
+  signal?: AbortSignal
 ): Promise<string> {
   const res = await fetch("https://api.anthropic.com/v1/messages", {
     method: "POST",
@@ -79,6 +90,7 @@ async function anthropic(
       system: SYSTEM_PROMPT,
       messages: [{ role: "user", content: prompt }],
     }),
+    signal,
   });
   if (!res.ok) {
     const text = await res.text();
@@ -94,7 +106,8 @@ async function anthropic(
 async function gemini(
   apiKey: string,
   model: string,
-  prompt: string
+  prompt: string,
+  signal?: AbortSignal
 ): Promise<string> {
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
   const res = await fetch(url, {
@@ -104,6 +117,7 @@ async function gemini(
       systemInstruction: { parts: [{ text: SYSTEM_PROMPT }] },
       contents: [{ role: "user", parts: [{ text: prompt }] }],
     }),
+    signal,
   });
   if (!res.ok) {
     const text = await res.text();
@@ -127,29 +141,29 @@ export async function callProvider(
     );
   }
 
-  const task = (async () => {
+  const task = async (signal: AbortSignal) => {
     switch (provider) {
       case "openai":
-        return openAiCompatible("https://api.openai.com/v1", apiKey, model, prompt);
+        return openAiCompatible("https://api.openai.com/v1", apiKey, model, prompt, {}, signal);
       case "xai":
-        return openAiCompatible("https://api.x.ai/v1", apiKey, model, prompt);
+        return openAiCompatible("https://api.x.ai/v1", apiKey, model, prompt, {}, signal);
       case "deepseek":
-        return openAiCompatible("https://api.deepseek.com/v1", apiKey, model, prompt);
+        return openAiCompatible("https://api.deepseek.com/v1", apiKey, model, prompt, {}, signal);
       case "moonshot":
-        return openAiCompatible("https://api.moonshot.cn/v1", apiKey, model, prompt);
+        return openAiCompatible("https://api.moonshot.cn/v1", apiKey, model, prompt, {}, signal);
       case "openrouter":
         return openAiCompatible("https://openrouter.ai/api/v1", apiKey, model, prompt, {
           "HTTP-Referer": "https://ai-arena.vercel.app",
           "X-Title": "AI Arena",
-        });
+        }, signal);
       case "anthropic":
-        return anthropic(apiKey, model, prompt);
+        return anthropic(apiKey, model, prompt, signal);
       case "gemini":
-        return gemini(apiKey, model, prompt);
+        return gemini(apiKey, model, prompt, signal);
       default:
         throw new Error(`Provider không hỗ trợ: ${provider}`);
     }
-  })();
+  };
 
   return withTimeout(task);
 }
