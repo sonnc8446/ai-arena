@@ -13,7 +13,10 @@ export default async function HomePage() {
     .eq("enabled", true)
     .order("sort_order", { ascending: true });
 
-  const tools = (data ?? []) as AiTool[];
+  const rawTools = (data ?? []) as AiTool[];
+  
+  // Lọc bỏ các duplicate bằng cách giữ lại công cụ đầu tiên của mỗi provider
+  const tools = Array.from(new Map(rawTools.map(t => [t.provider, t])).values());
 
   return (
     <main className="mx-auto max-w-6xl px-4 py-8">

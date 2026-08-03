@@ -1,10 +1,10 @@
 import type { Provider } from "@/lib/types";
 
-const SYSTEM_PROMPT =
+export const SYSTEM_PROMPT =
   "You are a helpful assistant. Answer clearly and concisely.";
 
 // Map provider -> env var chứa API key
-const KEY_ENV: Record<Provider, string> = {
+export const KEY_ENV: Record<Provider, string> = {
   openai: "OPENAI_API_KEY",
   anthropic: "ANTHROPIC_API_KEY",
   gemini: "GEMINI_API_KEY",
@@ -14,23 +14,49 @@ const KEY_ENV: Record<Provider, string> = {
   openrouter: "OPENROUTER_API_KEY",
 };
 
+// Base URL cho các provider dùng chuẩn OpenAI-compatible.
+export const OPENAI_COMPATIBLE_BASE_URLS: Partial<Record<Provider, string>> = {
+  openai: "https://api.openai.com/v1",
+  xai: "https://api.x.ai/v1",
+  deepseek: "https://api.deepseek.com/v1",
+  moonshot: "https://api.moonshot.cn/v1",
+  openrouter: "https://openrouter.ai/api/v1",
+};
+
+export const OPENROUTER_HEADERS: Record<string, string> = {
+  "HTTP-Referer": "https://ai-arena.vercel.app",
+  "X-Title": "AI Arena",
+};
+
 export function getApiKey(provider: Provider): string | undefined {
   return process.env[KEY_ENV[provider]];
 }
 
-async function withTimeout<T>(fn: (signal: AbortSignal) => Promise<T>, ms = 60000): Promise<T> {
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), ms);
-  try {
-    return await fn(controller.signal);
-  } catch (error: any) {
-    if (error.name === 'AbortError') {
-      throw new Error(`Timeout sau ${ms}ms`);
-    }
-    throw error;
-  } finally {
-    clearTimeout(timeoutId);
-  }
+export function withTimeout<T>(p: Promise<T>, ms = 60000): Promise<T> {
+  const controller = new Promise<T>((_, reject) =>
+    setTimeout(() => reject(new Error(`Timeout sau ${ms}ms`)), ms)
+  );
+  return Promise.race([p, controller]);
+}
+
+// ---- Pure parsers (tách để test không cần network) ----
+
+export function parseOpenAiContent(data: any): string {
+  const content = data?.choices?.[0]?.message?.content;
+  if (!content) throw new Error("Không có nội dung trả về");
+  return content.trim();
+}
+
+export function parseAnthropicContent(data: any): string {
+  const content = data?.content?.[0]?.text;
+  if (!content) throw new Error("Không có nội dung trả về");
+  return content.trim();
+}
+
+export function parseGeminiContent(data: any): string {
+  const content = data?.candidates?.[0]?.content?.parts?.[0]?.text;
+  if (!content) throw new Error("Không có nội dung trả về");
+  return content.trim();
 }
 
 // ---- Chuẩn OpenAI-compatible (dùng cho openai, xai, deepseek, moonshot, openrouter) ----
@@ -39,8 +65,7 @@ async function openAiCompatible(
   apiKey: string,
   model: string,
   prompt: string,
-  extraHeaders: Record<string, string> = {},
-  signal?: AbortSignal
+  extraHeaders: Record<string, string> = {}
 ): Promise<string> {
   const res = await fetch(`${baseUrl}/chat/completions`, {
     method: "POST",
@@ -57,25 +82,20 @@ async function openAiCompatible(
       ],
       temperature: 0.7,
     }),
-    signal,
   });
 
   if (!res.ok) {
     const text = await res.text();
     throw new Error(`HTTP ${res.status}: ${text.slice(0, 300)}`);
   }
-  const data = await res.json();
-  const content = data?.choices?.[0]?.message?.content;
-  if (!content) throw new Error("Không có nội dung trả về");
-  return content.trim();
+  return parseOpenAiContent(await res.json());
 }
 
 // ---- Anthropic (Claude) ----
 async function anthropic(
   apiKey: string,
   model: string,
-  prompt: string,
-  signal?: AbortSignal
+  prompt: string
 ): Promise<string> {
   const res = await fetch("https://api.anthropic.com/v1/messages", {
     method: "POST",
@@ -90,24 +110,19 @@ async function anthropic(
       system: SYSTEM_PROMPT,
       messages: [{ role: "user", content: prompt }],
     }),
-    signal,
   });
   if (!res.ok) {
     const text = await res.text();
     throw new Error(`HTTP ${res.status}: ${text.slice(0, 300)}`);
   }
-  const data = await res.json();
-  const content = data?.content?.[0]?.text;
-  if (!content) throw new Error("Không có nội dung trả về");
-  return content.trim();
+  return parseAnthropicContent(await res.json());
 }
 
 // ---- Google Gemini ----
 async function gemini(
   apiKey: string,
   model: string,
-  prompt: string,
-  signal?: AbortSignal
+  prompt: string
 ): Promise<string> {
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
   const res = await fetch(url, {
@@ -117,16 +132,12 @@ async function gemini(
       systemInstruction: { parts: [{ text: SYSTEM_PROMPT }] },
       contents: [{ role: "user", parts: [{ text: prompt }] }],
     }),
-    signal,
   });
   if (!res.ok) {
     const text = await res.text();
     throw new Error(`HTTP ${res.status}: ${text.slice(0, 300)}`);
   }
-  const data = await res.json();
-  const content = data?.candidates?.[0]?.content?.parts?.[0]?.text;
-  if (!content) throw new Error("Không có nội dung trả về");
-  return content.trim();
+  return parseGeminiContent(await res.json());
 }
 
 export async function callProvider(
@@ -141,29 +152,22 @@ export async function callProvider(
     );
   }
 
-  const task = async (signal: AbortSignal) => {
+  const task = (async () => {
+    const openAiBase = OPENAI_COMPATIBLE_BASE_URLS[provider];
+    if (openAiBase) {
+      const extra = provider === "openrouter" ? OPENROUTER_HEADERS : {};
+      return openAiCompatible(openAiBase, apiKey, model, prompt, extra);
+    }
+
     switch (provider) {
-      case "openai":
-        return openAiCompatible("https://api.openai.com/v1", apiKey, model, prompt, {}, signal);
-      case "xai":
-        return openAiCompatible("https://api.x.ai/v1", apiKey, model, prompt, {}, signal);
-      case "deepseek":
-        return openAiCompatible("https://api.deepseek.com/v1", apiKey, model, prompt, {}, signal);
-      case "moonshot":
-        return openAiCompatible("https://api.moonshot.cn/v1", apiKey, model, prompt, {}, signal);
-      case "openrouter":
-        return openAiCompatible("https://openrouter.ai/api/v1", apiKey, model, prompt, {
-          "HTTP-Referer": "https://ai-arena.vercel.app",
-          "X-Title": "AI Arena",
-        }, signal);
       case "anthropic":
-        return anthropic(apiKey, model, prompt, signal);
+        return anthropic(apiKey, model, prompt);
       case "gemini":
-        return gemini(apiKey, model, prompt, signal);
+        return gemini(apiKey, model, prompt);
       default:
         throw new Error(`Provider không hỗ trợ: ${provider}`);
     }
-  };
+  })();
 
   return withTimeout(task);
 }

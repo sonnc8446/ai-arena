@@ -1,25 +1,22 @@
 import { NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
-import { callProvider } from "@/lib/providers";
-import type { AiTool, ChatResult } from "@/lib/types";
+import { runTools, validatePrompt } from "@/lib/chat";
+import type { AiTool } from "@/lib/types";
 
 export const runtime = "nodejs";
 export const maxDuration = 60;
 
 export async function POST(req: Request) {
-  let prompt = "";
+  let body: any;
   try {
-    const body = await req.json();
-    prompt = (body?.prompt ?? "").toString().trim();
+    body = await req.json();
   } catch {
     return NextResponse.json({ error: "Body không hợp lệ" }, { status: 400 });
   }
 
-  if (!prompt) {
-    return NextResponse.json({ error: "Prompt trống" }, { status: 400 });
-  }
-  if (prompt.length > 8000) {
-    return NextResponse.json({ error: "Prompt quá dài" }, { status: 400 });
+  const validation = validatePrompt(body?.prompt);
+  if (!validation.ok) {
+    return NextResponse.json({ error: validation.error }, { status: 400 });
   }
 
   const supabase = createClient();
@@ -44,35 +41,6 @@ export async function POST(req: Request) {
     );
   }
 
-  const results: ChatResult[] = await Promise.all(
-    tools.map(async (tool): Promise<ChatResult> => {
-      const start = Date.now();
-      try {
-        const content = await callProvider(tool.provider, tool.model, prompt);
-        return {
-          toolId: tool.id,
-          name: tool.name,
-          provider: tool.provider,
-          model: tool.model,
-          accent_color: tool.accent_color,
-          ok: true,
-          content,
-          elapsedMs: Date.now() - start,
-        };
-      } catch (e: any) {
-        return {
-          toolId: tool.id,
-          name: tool.name,
-          provider: tool.provider,
-          model: tool.model,
-          accent_color: tool.accent_color,
-          ok: false,
-          error: e?.message ?? "Lỗi không xác định",
-          elapsedMs: Date.now() - start,
-        };
-      }
-    })
-  );
-
+  const results = await runTools(tools, validation.prompt);
   return NextResponse.json({ results });
 }
