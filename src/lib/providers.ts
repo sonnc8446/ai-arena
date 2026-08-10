@@ -32,11 +32,32 @@ export function getApiKey(provider: Provider): string | undefined {
   return process.env[KEY_ENV[provider]];
 }
 
-export function withTimeout<T>(p: Promise<T>, ms = 60000): Promise<T> {
-  const controller = new Promise<T>((_, reject) =>
+// Giới hạn độ dài phản hồi để kiểm soát chi phí + độ trễ.
+export const MAX_TOKENS = 1024;
+export const DEFAULT_TIMEOUT_MS = 60000;
+
+// Thực thi 1 promise (đã có sẵn signal bên trong) với timeout.
+// Trả về signal để fetch hủy thật khi hết giờ (không rò rỉ kết nối như Promise.race).
+export function makeTimeoutSignal(ms = DEFAULT_TIMEOUT_MS): {
+  signal: AbortSignal;
+  cleanup: () => void;
+} {
+  const controller = new AbortController();
+  const timer = setTimeout(
+    () => controller.abort(new Error(`Timeout sau ${ms}ms`)),
+    ms
+  );
+  return { signal: controller.signal, cleanup: () => clearTimeout(timer) };
+}
+
+// Helper cũ dựa trên Promise.race. LƯU Ý: không hủy fetch thật (chỉ reject).
+// callProvider hiện dùng makeTimeoutSignal (AbortController) để hủy đúng cách.
+// Giữ lại cho tương thích/tiện dụng ở các tác vụ không phải fetch.
+export function withTimeout<T>(p: Promise<T>, ms = DEFAULT_TIMEOUT_MS): Promise<T> {
+  const guard = new Promise<T>((_, reject) =>
     setTimeout(() => reject(new Error(`Timeout sau ${ms}ms`)), ms)
   );
-  return Promise.race([p, controller]);
+  return Promise.race([p, guard]);
 }
 
 // ---- Pure parsers (tách để test không cần network) ----
@@ -65,10 +86,12 @@ async function openAiCompatible(
   apiKey: string,
   model: string,
   prompt: string,
+  signal: AbortSignal,
   extraHeaders: Record<string, string> = {}
 ): Promise<string> {
   const res = await fetch(`${baseUrl}/chat/completions`, {
     method: "POST",
+    signal,
     headers: {
       "Content-Type": "application/json",
       Authorization: `Bearer ${apiKey}`,
@@ -81,6 +104,7 @@ async function openAiCompatible(
         { role: "user", content: prompt },
       ],
       temperature: 0.7,
+      max_tokens: MAX_TOKENS,
     }),
   });
 
@@ -95,10 +119,12 @@ async function openAiCompatible(
 async function anthropic(
   apiKey: string,
   model: string,
-  prompt: string
+  prompt: string,
+  signal: AbortSignal
 ): Promise<string> {
   const res = await fetch("https://api.anthropic.com/v1/messages", {
     method: "POST",
+    signal,
     headers: {
       "Content-Type": "application/json",
       "x-api-key": apiKey,
@@ -106,7 +132,7 @@ async function anthropic(
     },
     body: JSON.stringify({
       model,
-      max_tokens: 1024,
+      max_tokens: MAX_TOKENS,
       system: SYSTEM_PROMPT,
       messages: [{ role: "user", content: prompt }],
     }),
@@ -122,15 +148,21 @@ async function anthropic(
 async function gemini(
   apiKey: string,
   model: string,
-  prompt: string
+  prompt: string,
+  signal: AbortSignal
 ): Promise<string> {
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
+  // Mã hoá model để tránh path injection vào URL.
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(
+    model
+  )}:generateContent?key=${apiKey}`;
   const res = await fetch(url, {
     method: "POST",
+    signal,
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
       systemInstruction: { parts: [{ text: SYSTEM_PROMPT }] },
       contents: [{ role: "user", parts: [{ text: prompt }] }],
+      generationConfig: { maxOutputTokens: MAX_TOKENS },
     }),
   });
   if (!res.ok) {
@@ -152,22 +184,29 @@ export async function callProvider(
     );
   }
 
-  const task = (async () => {
+  const { signal, cleanup } = makeTimeoutSignal();
+  try {
     const openAiBase = OPENAI_COMPATIBLE_BASE_URLS[provider];
     if (openAiBase) {
       const extra = provider === "openrouter" ? OPENROUTER_HEADERS : {};
-      return openAiCompatible(openAiBase, apiKey, model, prompt, extra);
+      return await openAiCompatible(openAiBase, apiKey, model, prompt, signal, extra);
     }
 
     switch (provider) {
       case "anthropic":
-        return anthropic(apiKey, model, prompt);
+        return await anthropic(apiKey, model, prompt, signal);
       case "gemini":
-        return gemini(apiKey, model, prompt);
+        return await gemini(apiKey, model, prompt, signal);
       default:
         throw new Error(`Provider không hỗ trợ: ${provider}`);
     }
-  })();
-
-  return withTimeout(task);
+  } catch (e: any) {
+    if (e?.name === "AbortError") {
+      const reason = signal.reason;
+      throw reason instanceof Error ? reason : new Error("Đã huỷ yêu cầu");
+    }
+    throw e;
+  } finally {
+    cleanup();
+  }
 }

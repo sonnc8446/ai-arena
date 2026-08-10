@@ -184,4 +184,36 @@ describe("callProvider", () => {
     const [url] = fetchMock.mock.calls[0];
     expect(url).toContain("gemini-1.5-flash:generateContent?key=gkey");
   });
+
+  it("gửi max_tokens và truyền AbortSignal cho openai-compatible", async () => {
+    process.env.OPENAI_API_KEY = "sk-openai";
+    const fetchMock = vi.fn(async () => ({
+      ok: true,
+      json: async () => ({ choices: [{ message: { content: "ok" } }] }),
+    })) as any;
+    vi.stubGlobal("fetch", fetchMock);
+
+    await callProvider("openai", "gpt-4o-mini", "hi");
+    const [, init] = fetchMock.mock.calls[0];
+    const body = JSON.parse(init.body);
+    expect(body.max_tokens).toBe(1024);
+    expect(init.signal).toBeInstanceOf(AbortSignal);
+  });
+
+  it("gemini mã hoá model để tránh path injection và giới hạn maxOutputTokens", async () => {
+    process.env.GEMINI_API_KEY = "gkey";
+    const fetchMock = vi.fn(async () => ({
+      ok: true,
+      json: async () => ({ candidates: [{ content: { parts: [{ text: "g" }] } }] }),
+    })) as any;
+    vi.stubGlobal("fetch", fetchMock);
+
+    await callProvider("gemini", "models/../evil", "hi");
+    const [url, init] = fetchMock.mock.calls[0];
+    // ký tự nguy hiểm bị mã hoá
+    expect(url).not.toContain("../");
+    expect(url).toContain("models%2F..%2Fevil");
+    const body = JSON.parse(init.body);
+    expect(body.generationConfig.maxOutputTokens).toBe(1024);
+  });
 });
