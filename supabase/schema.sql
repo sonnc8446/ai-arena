@@ -1,30 +1,36 @@
 -- ============================================================
--- AI Arena - Supabase schema
--- Chạy file này trong Supabase Dashboard > SQL Editor
+-- AI Arena — Canonical schema reference (DDL)
+-- ============================================================
+-- File này là BẢN THAM CHIẾU schema đầy đủ (dễ đọc trong 1 file).
+--
+-- Nguồn sự thật để áp dụng lên DB:
+--   - Dùng Supabase CLI: các file trong supabase/migrations/ (khuyến nghị)
+--   - Seed dữ liệu mẫu: supabase/seed.sql
+--   - Hoặc dán nội dung file này vào Dashboard > SQL Editor cho lần khởi tạo nhanh
+--
+-- Khi thay đổi schema: tạo migration mới bằng `supabase migration new <name>`,
+-- rồi cập nhật lại file tham chiếu này cho khớp. KHÔNG đặt seed ở đây.
 -- ============================================================
 
 -- Bảng cấu hình các AI tool (engine)
 create table if not exists public.ai_tools (
   id uuid primary key default gen_random_uuid(),
-  -- Tên hiển thị: "ChatGPT", "Gemini", ...
   name text not null,
-  -- provider: khớp với adapter trong code (openai | anthropic | gemini | xai | deepseek | moonshot | openrouter)
+  -- provider khớp adapter code: openai|anthropic|gemini|xai|deepseek|moonshot|openrouter
   provider text not null,
-  -- model id gửi tới API, ví dụ "gpt-4o-mini", "gemini-1.5-flash"
   model text not null,
-  -- bật/tắt engine này trên trang guest
   enabled boolean not null default true,
-  -- thứ tự hiển thị
   sort_order int not null default 0,
-  -- màu badge (tuỳ chọn, hex)
   accent_color text default '#6366f1',
-  -- ghi chú/mô tả ngắn
   description text default '',
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
 );
 
--- Tự cập nhật updated_at
+create index if not exists idx_ai_tools_enabled_sort
+  on public.ai_tools (enabled, sort_order);
+
+-- Trigger tự cập nhật updated_at
 create or replace function public.set_updated_at()
 returns trigger as $$
 begin
@@ -38,33 +44,67 @@ create trigger trg_ai_tools_updated_at
   before update on public.ai_tools
   for each row execute function public.set_updated_at();
 
--- ============================================================
 -- Row Level Security
--- ============================================================
 alter table public.ai_tools enable row level security;
 
--- Ai cũng đọc được (guest xem danh sách engine đang bật)
 drop policy if exists "public read ai_tools" on public.ai_tools;
 create policy "public read ai_tools"
   on public.ai_tools for select
   using (true);
 
--- Chỉ user đã đăng nhập (admin) được thêm/sửa/xoá
+-- Chỉ admin (profiles.role = 'admin') được ghi ai_tools.
 drop policy if exists "authenticated write ai_tools" on public.ai_tools;
-create policy "authenticated write ai_tools"
+drop policy if exists "admin write ai_tools" on public.ai_tools;
+create policy "admin write ai_tools"
   on public.ai_tools for all
   to authenticated
-  using (true)
-  with check (true);
+  using (public.is_admin())
+  with check (public.is_admin());
 
 -- ============================================================
--- Dữ liệu mẫu (seed)
+-- Phân quyền: bảng profiles + helper is_admin + trigger tạo profile
 -- ============================================================
-insert into public.ai_tools (name, provider, model, enabled, sort_order, accent_color, description) values
-  ('ChatGPT', 'openai',     'gpt-4o-mini',            true, 1, '#10a37f', 'OpenAI GPT-4o mini'),
-  ('Claude',  'anthropic',  'claude-3-5-sonnet-latest', true, 2, '#d97757', 'Anthropic Claude 3.5 Sonnet'),
-  ('Gemini',  'gemini',     'gemini-1.5-flash',       true, 3, '#4285f4', 'Google Gemini 1.5 Flash'),
-  ('Grok',    'xai',        'grok-2-latest',          true, 4, '#000000', 'xAI Grok 2'),
-  ('DeepSeek','deepseek',   'deepseek-chat',          true, 5, '#4d6bfe', 'DeepSeek V3 Chat'),
-  ('Kimi',    'moonshot',   'moonshot-v1-8k',         true, 6, '#111111', 'Moonshot Kimi')
-on conflict do nothing;
+create table if not exists public.profiles (
+  user_id uuid primary key references auth.users(id) on delete cascade,
+  role text not null default 'viewer',   -- 'admin' | 'viewer'
+  created_at timestamptz not null default now()
+);
+
+alter table public.profiles enable row level security;
+
+drop policy if exists "read own profile" on public.profiles;
+create policy "read own profile"
+  on public.profiles for select
+  to authenticated
+  using (user_id = auth.uid());
+
+create or replace function public.is_admin()
+returns boolean
+language sql
+security definer
+set search_path = public
+as $$
+  select exists (
+    select 1 from public.profiles
+    where user_id = auth.uid() and role = 'admin'
+  );
+$$;
+
+create or replace function public.handle_new_user()
+returns trigger
+language plpgsql
+security definer
+set search_path = public
+as $$
+begin
+  insert into public.profiles (user_id, role)
+  values (new.id, 'viewer')
+  on conflict (user_id) do nothing;
+  return new;
+end;
+$$;
+
+drop trigger if exists on_auth_user_created on auth.users;
+create trigger on_auth_user_created
+  after insert on auth.users
+  for each row execute function public.handle_new_user();
