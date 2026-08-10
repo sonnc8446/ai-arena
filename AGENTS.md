@@ -1,5 +1,8 @@
 # AI Arena — Project Notes for Kilo Agent
 
+> 📚 Tài liệu đầy đủ ở `docs/` — đọc `docs/README.md` trước khi nâng cấp:
+> Requirements (SRS), Technical Spec, và AI Agent onboarding guide.
+
 ## Stack
 - **Frontend + Backend**: Next.js 14 (App Router) + API Routes, TypeScript, Tailwind CSS
 - **Database + Auth**: Supabase (Postgres free tier)
