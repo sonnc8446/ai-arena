@@ -15,8 +15,13 @@ export default async function HomePage() {
 
   const rawTools = (data ?? []) as AiTool[];
   
-  // Lọc bỏ các duplicate bằng cách giữ lại công cụ đầu tiên của mỗi provider
-  const tools = Array.from(new Map(rawTools.map(t => [t.provider, t])).values());
+  // Lọc bỏ các duplicate bằng cách giữ lại công cụ đầu tiên của mỗi provider (FR-6)
+  const seen = new Set<string>();
+  const tools = rawTools.filter(t => {
+    if (seen.has(t.provider)) return false;
+    seen.add(t.provider);
+    return true;
+  });
 
   return (
     <main className="mx-auto max-w-6xl px-4 py-8">
